@@ -27,47 +27,18 @@ typedef struct {
     bool hasSensors;    // Whether thermal sensors are active
 } ThermalData;
 
-/**
- * Initialize SMC connection and HID sensor client.
- * Returns true if SMC / sensors were initialized successfully.
- */
 bool smc_bridge_init(void);
-
-/**
- * Close SMC connection and clean up resources.
- */
 void smc_bridge_close(void);
-
-/**
- * Query the number of active cooling fans detected by the hardware.
- */
 int smc_bridge_get_fan_count(void);
-
-/**
- * Retrieve current fan telemetry (RPM, Min, Max, Target, Mode).
- */
 bool smc_bridge_get_fan_info(int fanIndex, FanData *outData);
-
-/**
- * Manually set fan speed for a specific fan index.
- * Target RPM is automatically clamped between minRPM and maxRPM.
- */
 bool smc_bridge_set_fan_speed(int fanIndex, float targetRPM);
-
-/**
- * Return specific fan to automatic system thermal management.
- */
 bool smc_bridge_set_fan_auto(int fanIndex);
-
-/**
- * Reset all fans to automatic system thermal management.
- */
 bool smc_bridge_reset_all_fans(void);
-
-/**
- * Query current live system temperatures.
- */
 bool smc_bridge_get_thermals(ThermalData *outData);
+
+// Privileged Helper Management for Apple Silicon
+bool smc_bridge_is_helper_installed(void);
+bool smc_bridge_install_helper(const char *bundledHelperPath);
 
 #ifdef __cplusplus
 }

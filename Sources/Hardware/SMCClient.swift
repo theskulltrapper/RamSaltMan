@@ -62,6 +62,16 @@ public final class SMCClient {
         return Int(smc_bridge_get_fan_count())
     }
 
+    public var isHelperInstalled: Bool {
+        return smc_bridge_is_helper_installed()
+    }
+
+    public func installHelper() -> Bool {
+        let bundle = Bundle.main.bundlePath
+        let helperPath = "\(bundle)/Contents/Resources/RamSaltManHelper"
+        return smc_bridge_install_helper(helperPath)
+    }
+
     public func getAllFans() -> [FanInfo] {
         let count = getFanCount()
         var fans: [FanInfo] = []

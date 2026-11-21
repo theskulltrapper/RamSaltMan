@@ -14,9 +14,12 @@ CACHE_DIR="/tmp/swift-cache"
 mkdir -p "$BUILD_DIR"
 mkdir -p "$CACHE_DIR"
 
-# 1. Compile C SMC Bridge
+# 1. Compile C SMC Bridge and Helper
 echo "--> Compiling SMC Bridge..."
 clang -c -O3 -Wall -Wextra -I Sources/Bridge Sources/Bridge/SMCBridge.c -o "$BUILD_DIR/SMCBridge.o"
+
+echo "--> Compiling Privileged Helper..."
+clang -O3 -Wall -Wextra Sources/Helper/RamSaltManHelper.c -framework IOKit -framework CoreFoundation -o "$BUILD_DIR/RamSaltManHelper"
 
 # 2. Collect Swift files
 SWIFT_FILES=(
@@ -56,6 +59,7 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$BUILD_DIR/RamSaltMan" "$APP_BUNDLE/Contents/MacOS/"
+cp "$BUILD_DIR/RamSaltManHelper" "$APP_BUNDLE/Contents/Resources/"
 cp Sources/Resources/Info.plist "$APP_BUNDLE/Contents/"
 cp Sources/Resources/AppIcon.icns "$APP_BUNDLE/Contents/Resources/"
 

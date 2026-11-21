@@ -10,8 +10,23 @@ public final class DashboardViewModel: ObservableObject {
     @Published public var thermals: ThermalState = .zero
     @Published public var fans: [FanInfo] = []
     @Published public var fanSliderValues: [Int: Double] = [:]
+    @Published public var isHelperInstalled: Bool = false
 
-    public init() {}
+    public init() {
+        isHelperInstalled = SMCClient.shared.isHelperInstalled
+    }
+
+    public func installHelper() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let success = SMCClient.shared.installHelper()
+            DispatchQueue.main.async {
+                self?.isHelperInstalled = SMCClient.shared.isHelperInstalled
+                if success {
+                    self?.refresh()
+                }
+            }
+        }
+    }
 
     public func refresh() {
         memorySnapshot = MemoryMonitor.shared.sample()

@@ -86,6 +86,10 @@ struct MainContainerView: View {
                         FanControlView(
                             fans: vm.fans,
                             sliderValues: vm.fanSliderValues,
+                            isHelperInstalled: vm.isHelperInstalled,
+                            onAuthorize: {
+                                vm.installHelper()
+                            },
                             onSetFanSpeed: { index, speed in
                                 vm.setFanSpeed(index: index, speed: speed)
                             },

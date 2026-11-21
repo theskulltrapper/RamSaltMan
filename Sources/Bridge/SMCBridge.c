@@ -2,8 +2,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include <unistd.h>
+#include <sys/stat.h>
 #include <mach/mach.h>
 #include <IOKit/IOKitLib.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -15,28 +18,23 @@
 
 #define SMC_KEY_FNUM "FNum"
 #define SMC_KEY_FS "FS! "
+#define SMC_KEY_FTST "Ftst"
 
+#define HELPER_PATH "/Library/PrivilegedHelperTools/com.theskulltrapper.RamSaltManHelper"
 #define MAX_FANS 8
 
 typedef struct {
-    uint8_t major;
-    uint8_t minor;
-    uint8_t build;
-    uint8_t reserved;
+    uint8_t major, minor, build, reserved;
     uint16_t release;
 } SMCKeyData_vers_t;
 
 typedef struct {
-    uint16_t version;
-    uint16_t length;
-    uint32_t cpuPLimit;
-    uint32_t gpuPLimit;
-    uint32_t memPLimit;
+    uint16_t version, length;
+    uint32_t cpuPLimit, gpuPLimit, memPLimit;
 } SMCKeyData_pLimitData_t;
 
 typedef struct {
-    uint32_t dataSize;
-    uint32_t dataType;
+    uint32_t dataSize, dataType;
     uint8_t dataAttributes;
 } SMCKeyData_keyInfo_t;
 
@@ -45,9 +43,7 @@ typedef struct {
     SMCKeyData_vers_t vers;
     SMCKeyData_pLimitData_t pLimitData;
     SMCKeyData_keyInfo_t keyInfo;
-    uint8_t result;
-    uint8_t status;
-    uint8_t data8;
+    uint8_t result, status, data8;
     uint32_t data32;
     uint8_t bytes[32];
 } SMCKeyData_t;
@@ -57,7 +53,7 @@ static pthread_mutex_t g_smc_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool g_initialized = false;
 static int g_fan_count = 0;
 
-// Dynamic IOHIDEventSystemClient bindings for Apple Silicon Thermal telemetry
+// Dynamic IOHIDEventSystemClient bindings
 typedef void *IOHIDEventSystemClientRef;
 typedef void *IOHIDServiceClientRef;
 typedef void *IOHIDEventRef;
@@ -129,27 +125,53 @@ static kern_return_t smc_write(const char *keyStr, const SMCKeyData_t *valIn) {
 
 static float parse_speed(const SMCKeyData_t *data) {
     uint32_t dt = data->keyInfo.dataType;
-    // 'flt ' = 0x666C7420
-    if (dt == 0x666C7420) {
+    if (dt == 0x666C7420 || data->keyInfo.dataSize == 4) { // flt or 4-byte float
         float f = 0.0f;
         memcpy(&f, data->bytes, sizeof(float));
         return f;
     }
-    // 'fpe2' = 0x66706532 (Fixed point 14.2)
-    if (dt == 0x66706532) {
+    if (dt == 0x66706532 || data->keyInfo.dataSize == 2) { // fpe2
         return (float)((data->bytes[0] << 6) | (data->bytes[1] >> 2));
     }
     return 0.0f;
 }
 
 static void encode_speed(float speed, uint32_t dt, uint8_t *outBytes) {
-    if (dt == 0x666C7420) { // flt
+    if (dt == 0x666C7420 || dt == 0) {
         memcpy(outBytes, &speed, sizeof(float));
-    } else { // fpe2
+    } else {
         uint16_t fixed = (uint16_t)(speed * 4.0f);
         outBytes[0] = (uint8_t)(fixed >> 8);
         outBytes[1] = (uint8_t)(fixed & 0xFF);
     }
+}
+
+bool smc_bridge_is_helper_installed(void) {
+    struct stat st;
+    if (stat(HELPER_PATH, &st) == 0) {
+        // Must be owned by root and have setuid (04755)
+        if (st.st_uid == 0 && (st.st_mode & S_ISUID)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool smc_bridge_install_helper(const char *bundledHelperPath) {
+    if (!bundledHelperPath) return false;
+
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "osascript -e 'do shell script \""
+             "mkdir -p /Library/PrivilegedHelperTools && "
+             "cp -f \\\"%s\\\" %s && "
+             "chown root:wheel %s && "
+             "chmod 4755 %s"
+             "\" with administrator privileges'",
+             bundledHelperPath, HELPER_PATH, HELPER_PATH, HELPER_PATH);
+
+    int res = system(cmd);
+    return res == 0;
 }
 
 static void init_hid_client(void) {
@@ -168,8 +190,8 @@ static void init_hid_client(void) {
     if (pIOHIDEventSystemClientCreate && pIOHIDEventSystemClientSetMatching && pIOHIDEventSystemClientCopyServices) {
         g_hid_client = pIOHIDEventSystemClientCreate(kCFAllocatorDefault);
         if (g_hid_client) {
-            int page = 0xff00; // AppleVendor
-            int usage = 5;     // TemperatureSensor
+            int page = 0xff00;
+            int usage = 5;
             CFNumberRef pageNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &page);
             CFNumberRef usageNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &usage);
 
@@ -218,7 +240,6 @@ bool smc_bridge_init(void) {
     }
 
     init_hid_client();
-
     g_initialized = true;
     pthread_mutex_unlock(&g_smc_mutex);
     return true;
@@ -291,17 +312,19 @@ bool smc_bridge_get_fan_info(int fanIndex, FanData *outData) {
         outData->targetRPM = parse_speed(&val);
     }
 
-    // Mode: FS! or F%dMd
+    // Mode: F%dMd or FS!
     bool manual = false;
-    if (smc_read(SMC_KEY_FS, &val) == KERN_SUCCESS) {
-        uint16_t modeMask = (val.bytes[0] << 8) | val.bytes[1];
-        if (modeMask & (1 << fanIndex)) {
-            manual = true;
-        }
-    }
     snprintf(key, sizeof(key), "F%dMd", fanIndex);
     if (smc_read(key, &val) == KERN_SUCCESS) {
         if (val.bytes[0] == 1) manual = true;
+    }
+    snprintf(key, sizeof(key), "F%dmd", fanIndex);
+    if (smc_read(key, &val) == KERN_SUCCESS) {
+        if (val.bytes[0] == 1) manual = true;
+    }
+    if (smc_read(SMC_KEY_FS, &val) == KERN_SUCCESS) {
+        uint16_t modeMask = (val.bytes[0] << 8) | val.bytes[1];
+        if (modeMask & (1 << fanIndex)) manual = true;
     }
     outData->isManual = manual;
 
@@ -311,13 +334,22 @@ bool smc_bridge_get_fan_info(int fanIndex, FanData *outData) {
 
 bool smc_bridge_set_fan_speed(int fanIndex, float targetRPM) {
     if (fanIndex < 0 || fanIndex >= g_fan_count) return false;
+
+    // If privileged helper is available, execute via helper
+    if (smc_bridge_is_helper_installed()) {
+        char helperCmd[256];
+        snprintf(helperCmd, sizeof(helperCmd), "%s --set %d %.1f", HELPER_PATH, fanIndex, targetRPM);
+        int res = system(helperCmd);
+        return res == 0;
+    }
+
+    // Direct SMC write (runs if app is running elevated or on test kernels)
     if (!g_initialized) {
         if (!smc_bridge_init()) return false;
     }
 
     pthread_mutex_lock(&g_smc_mutex);
 
-    // Fetch bounds
     char key[5];
     SMCKeyData_t val;
     float minR = 1200.0f, maxR = 6000.0f;
@@ -331,8 +363,19 @@ bool smc_bridge_set_fan_speed(int fanIndex, float targetRPM) {
     if (targetRPM < minR) targetRPM = minR;
     if (targetRPM > maxR) targetRPM = maxR;
 
-    // 1. Enable manual mode via FS!
+    // 1. Apple Silicon Ftst Unlock
     memset(&val, 0, sizeof(val));
+    val.bytes[0] = 1;
+    smc_write(SMC_KEY_FTST, &val);
+    usleep(50000); // 50ms
+
+    // 2. Set mode to 1 (Manual)
+    snprintf(key, sizeof(key), "F%dMd", fanIndex);
+    smc_write(key, &val);
+    snprintf(key, sizeof(key), "F%dmd", fanIndex);
+    smc_write(key, &val);
+
+    // 3. Set Intel FS! bitmask if present
     if (smc_read(SMC_KEY_FS, &val) == KERN_SUCCESS) {
         uint16_t mask = (val.bytes[0] << 8) | val.bytes[1];
         mask |= (1 << fanIndex);
@@ -341,13 +384,7 @@ bool smc_bridge_set_fan_speed(int fanIndex, float targetRPM) {
         smc_write(SMC_KEY_FS, &val);
     }
 
-    // 2. Also write F%dMd = 1 if present
-    snprintf(key, sizeof(key), "F%dMd", fanIndex);
-    memset(&val, 0, sizeof(val));
-    val.bytes[0] = 1;
-    smc_write(key, &val);
-
-    // 3. Write target RPM
+    // 4. Write target RPM
     snprintf(key, sizeof(key), "F%dTg", fanIndex);
     memset(&val, 0, sizeof(val));
     if (smc_call(SMC_CMD_READ_KEYINFO, key, &val) == KERN_SUCCESS) {
@@ -361,15 +398,32 @@ bool smc_bridge_set_fan_speed(int fanIndex, float targetRPM) {
 
 bool smc_bridge_set_fan_auto(int fanIndex) {
     if (fanIndex < 0 || fanIndex >= g_fan_count) return false;
+
+    if (smc_bridge_is_helper_installed()) {
+        char helperCmd[256];
+        snprintf(helperCmd, sizeof(helperCmd), "%s --auto %d", HELPER_PATH, fanIndex);
+        int res = system(helperCmd);
+        return res == 0;
+    }
+
     if (!g_initialized) {
         if (!smc_bridge_init()) return false;
     }
 
     pthread_mutex_lock(&g_smc_mutex);
 
-    // Clear bit in FS!
+    char key[5];
     SMCKeyData_t val;
     memset(&val, 0, sizeof(val));
+    val.bytes[0] = 0;
+
+    snprintf(key, sizeof(key), "F%dMd", fanIndex);
+    smc_write(key, &val);
+    snprintf(key, sizeof(key), "F%dmd", fanIndex);
+    smc_write(key, &val);
+    smc_write(SMC_KEY_FTST, &val);
+
+    // Clear bit in FS!
     if (smc_read(SMC_KEY_FS, &val) == KERN_SUCCESS) {
         uint16_t mask = (val.bytes[0] << 8) | val.bytes[1];
         mask &= ~(1 << fanIndex);
@@ -378,18 +432,18 @@ bool smc_bridge_set_fan_auto(int fanIndex) {
         smc_write(SMC_KEY_FS, &val);
     }
 
-    // Set F%dMd = 0
-    char key[5];
-    snprintf(key, sizeof(key), "F%dMd", fanIndex);
-    memset(&val, 0, sizeof(val));
-    val.bytes[0] = 0;
-    smc_write(key, &val);
-
     pthread_mutex_unlock(&g_smc_mutex);
     return true;
 }
 
 bool smc_bridge_reset_all_fans(void) {
+    if (smc_bridge_is_helper_installed()) {
+        char helperCmd[256];
+        snprintf(helperCmd, sizeof(helperCmd), "%s --reset", HELPER_PATH);
+        int res = system(helperCmd);
+        return res == 0;
+    }
+
     if (!g_initialized) {
         if (!smc_bridge_init()) return false;
     }
@@ -401,12 +455,13 @@ bool smc_bridge_reset_all_fans(void) {
     val.bytes[0] = 0;
     val.bytes[1] = 0;
     smc_write(SMC_KEY_FS, &val);
+    smc_write(SMC_KEY_FTST, &val);
 
     for (int i = 0; i < g_fan_count; i++) {
         char key[5];
         snprintf(key, sizeof(key), "F%dMd", i);
-        memset(&val, 0, sizeof(val));
-        val.bytes[0] = 0;
+        smc_write(key, &val);
+        snprintf(key, sizeof(key), "F%dmd", i);
         smc_write(key, &val);
     }
 
@@ -418,7 +473,6 @@ bool smc_bridge_get_thermals(ThermalData *outData) {
     if (!outData) return false;
     memset(outData, 0, sizeof(ThermalData));
 
-    // Try IOHIDEventSystemClient first (Apple Silicon & modern macOS)
     if (g_hid_initialized && g_hid_client && pIOHIDEventSystemClientCopyServices &&
         pIOHIDServiceClientCopyProperty && pIOHIDServiceClientCopyEvent && pIOHIDEventGetFloatValue) {
         CFArrayRef services = pIOHIDEventSystemClientCopyServices(g_hid_client);
@@ -439,7 +493,7 @@ bool smc_bridge_get_thermals(ThermalData *outData) {
                 }
                 if (prop) CFRelease(prop);
 
-                IOHIDEventRef event = pIOHIDServiceClientCopyEvent(s, 15, 0, 0); // 15 = IOHIDEventTypeTemperature
+                IOHIDEventRef event = pIOHIDServiceClientCopyEvent(s, 15, 0, 0);
                 if (event) {
                     double t = pIOHIDEventGetFloatValue(event, (15 << 16));
                     CFRelease((CFTypeRef)event);
@@ -447,7 +501,6 @@ bool smc_bridge_get_thermals(ThermalData *outData) {
                     if (t > 0 && t < 125.0) {
                         if (t > maxT) maxT = t;
 
-                        // Check sensor name
                         char lowerName[128];
                         for (int j = 0; nameBuf[j] && j < 127; j++) lowerName[j] = (char)tolower(nameBuf[j]);
                         lowerName[strlen(nameBuf)] = '\0';
@@ -482,7 +535,6 @@ bool smc_bridge_get_thermals(ThermalData *outData) {
         }
     }
 
-    // Fallback: Intel SMC thermal keys
     if (!g_initialized) {
         if (!smc_bridge_init()) return false;
     }

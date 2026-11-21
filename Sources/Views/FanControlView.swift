@@ -3,6 +3,8 @@ import SwiftUI
 struct FanControlView: View {
     let fans: [FanInfo]
     let sliderValues: [Int: Double]
+    let isHelperInstalled: Bool
+    let onAuthorize: () -> Void
     let onSetFanSpeed: (Int, Double) -> Void
     let onSetFanAuto: (Int) -> Void
     let onResetAll: () -> Void
@@ -17,6 +19,37 @@ struct FanControlView: View {
                     .font(.system(size: 11, weight: .medium))
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+            }
+
+            // Privilege authorization banner for Apple Silicon
+            if !isHelperInstalled {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.shield")
+                            .font(.system(size: 18))
+                            .foregroundColor(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Apple Silicon Fan Permission")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("macOS requires one-time administrator authorization to allow apps to adjust fan speeds on Apple Silicon.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    Button(action: onAuthorize) {
+                        HStack {
+                            Image(systemName: "key.fill")
+                            Text("Authorize Fan Control")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.3), lineWidth: 1))
             }
 
             if fans.isEmpty {
