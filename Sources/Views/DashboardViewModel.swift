@@ -20,7 +20,10 @@ public final class DashboardViewModel: ObservableObject {
 
         for f in fans {
             if fanSliderValues[f.index] == nil {
-                fanSliderValues[f.index] = f.targetRPM > 0 ? f.targetRPM : (f.currentRPM > 0 ? f.currentRPM : f.minRPM)
+                let minBound = max(1000.0, f.minRPM > 0 ? f.minRPM : 1200.0)
+                let maxBound = max(minBound + 500.0, f.maxRPM > 0 ? f.maxRPM : 5000.0)
+                let target = f.targetRPM > 0 ? f.targetRPM : minBound
+                fanSliderValues[f.index] = min(maxBound, max(minBound, target))
             }
         }
 

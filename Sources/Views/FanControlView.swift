@@ -36,10 +36,16 @@ struct FanControlView: View {
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .windowBackgroundColor).opacity(0.6)))
             } else {
                 ForEach(fans) { fan in
-                    let currentVal = sliderValues[fan.index] ?? (fan.targetRPM > 0 ? fan.targetRPM : (fan.currentRPM > 0 ? fan.currentRPM : fan.minRPM))
+                    let minBound = max(1000.0, fan.minRPM > 0 ? fan.minRPM : 1200.0)
+                    let maxBound = max(minBound + 500.0, fan.maxRPM > 0 ? fan.maxRPM : 5000.0)
+                    let rawVal = sliderValues[fan.index] ?? (fan.targetRPM > 0 ? fan.targetRPM : minBound)
+                    let clampedVal = min(maxBound, max(minBound, rawVal))
+
                     FanCardView(
                         fan: fan,
-                        currentValue: currentVal,
+                        currentValue: clampedVal,
+                        minBound: minBound,
+                        maxBound: maxBound,
                         onSetSpeed: { speed in
                             onSetFanSpeed(fan.index, speed)
                         },
@@ -72,6 +78,8 @@ struct FanControlView: View {
 struct FanCardView: View {
     let fan: FanInfo
     let currentValue: Double
+    let minBound: Double
+    let maxBound: Double
     let onSetSpeed: (Double) -> Void
     let onSetAuto: () -> Void
 
@@ -102,10 +110,10 @@ struct FanCardView: View {
             VStack(spacing: 4) {
                 Slider(
                     value: Binding(
-                        get: { currentValue },
-                        set: { onSetSpeed($0) }
+                        get: { min(maxBound, max(minBound, currentValue)) },
+                        set: { onSetSpeed(min(maxBound, max(minBound, $0))) }
                     ),
-                    in: max(1000, fan.minRPM)...max(fan.minRPM + 500, fan.maxRPM),
+                    in: minBound...maxBound,
                     step: 50
                 ) {
                     Text("Speed")
@@ -133,21 +141,21 @@ struct FanCardView: View {
                 .controlSize(.small)
 
                 Button("Quiet") {
-                    let quietRPM = max(fan.minRPM, 1800.0)
+                    let quietRPM = max(minBound, min(2000.0, maxBound))
                     onSetSpeed(quietRPM)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
                 Button("Balanced") {
-                    let midRPM = (fan.minRPM + fan.maxRPM) / 2.0
+                    let midRPM = (minBound + maxBound) / 2.0
                     onSetSpeed(midRPM)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
                 Button("Max") {
-                    onSetSpeed(fan.maxRPM)
+                    onSetSpeed(maxBound)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
